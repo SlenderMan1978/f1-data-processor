@@ -21,7 +21,7 @@ class F1DataProcessor:
     def __init__(self, start_year, end_year):
         self.start_year = start_year
         self.end_year = end_year
-        self.all_data = []
+        self.season_data = defaultdict(list)  # 按赛季组织数据
 
     def load_season_data(self):
         """加载指定年份范围的所有赛季数据"""
@@ -29,7 +29,6 @@ class F1DataProcessor:
         for year in range(self.start_year, self.end_year + 1):
             print(f"\n处理 {year} 赛季...")
             try:
-                # 尝试不同的方式获取赛程
                 try:
                     schedule = fastf1.get_event_schedule(year)
                 except Exception as e:
@@ -59,26 +58,31 @@ class F1DataProcessor:
                             'event': event['EventName'],
                             'session': session
                         }
-                        self.all_data.append(race_data)
+                        self.season_data[year].append(race_data)
+
                     except Exception as e:
                         print(f"    跳过 {event['EventName']}: {e}")
 
             except Exception as e:
                 print(f"  {year}赛季加载失败: {e}")
 
-        print(f"\n总共加载了 {len(self.all_data)} 场比赛数据")
+        total_races = sum(len(races) for races in self.season_data.values())
+        print(f"\n总共加载了 {total_races} 场比赛数据")
+        print(f"赛季分布: {dict((y, len(r)) for y, r in self.season_data.items())}")
 
-        if len(self.all_data) == 0:
+        if total_races == 0:
             raise ValueError("未能加载任何比赛数据！请检查网络连接或年份范围。")
 
-    def calculate_accident_probabilities(self):
-        """计算车手事故概率"""
-        print("\n计算事故概率...")
+    def calculate_accident_probabilities_by_season(self, year):
+        """计算指定赛季的车手事故概率"""
         driver_stats = defaultdict(lambda: {'races': 0, 'accidents': 0})
 
-        for race_data in self.all_data:
+        for race_data in self.season_data[year]:
             session = race_data['session']
-            results = session.results
+            try:
+                results = session.results
+            except:
+                continue
 
             for _, driver in results.iterrows():
                 driver_name = driver['FullName']
@@ -86,26 +90,29 @@ class F1DataProcessor:
 
                 # 判断是否为事故退赛
                 status = str(driver['Status']).lower()
-                if any(keyword in status for keyword in ['collision', 'accident', 'damage', 'crash', 'spun']):
+                if any(keyword in status for keyword in ['collision', 'accident', 'damage', 'crash', 'spun off']):
                     driver_stats[driver_name]['accidents'] += 1
 
         # 计算概率，最小值设为0.045
         accident_probs = {}
         for driver, stats in driver_stats.items():
             if stats['races'] > 0:
-                prob = max(0.045, stats['accidents'] / stats['races'])
+                prob = stats['accidents'] / stats['races']
+                prob = max(0.045, prob)
                 accident_probs[driver] = round(prob, 3)
 
         return accident_probs
 
-    def calculate_failure_probabilities(self):
-        """计算车队故障概率"""
-        print("计算故障概率...")
+    def calculate_failure_probabilities_by_season(self, year):
+        """计算指定赛季的车队故障概率"""
         team_stats = defaultdict(lambda: {'races': 0, 'failures': 0})
 
-        for race_data in self.all_data:
+        for race_data in self.season_data[year]:
             session = race_data['session']
-            results = session.results
+            try:
+                results = session.results
+            except:
+                continue
 
             for _, driver in results.iterrows():
                 team_name = driver['TeamName']
@@ -115,67 +122,66 @@ class F1DataProcessor:
                 status = str(driver['Status']).lower()
                 if any(keyword in status for keyword in ['engine', 'gearbox', 'hydraulics',
                                                          'electrical', 'mechanical', 'power unit', 'transmission',
-                                                         'suspension']):
+                                                         'suspension', 'brakes', 'cooling', 'exhaust', 'fuel system']):
                     team_stats[team_name]['failures'] += 1
 
         # 计算概率，最小值设为0.041
         failure_probs = {}
         for team, stats in team_stats.items():
             if stats['races'] > 0:
-                prob = max(0.041, stats['failures'] / stats['races'])
+                prob = stats['failures'] / stats['races']
+                prob = max(0.041, prob)
                 failure_probs[team] = round(prob, 3)
 
         return failure_probs
 
     def calculate_lap_time_variability(self):
-        """计算车手圈速变化标准差"""
-        print("计算圈速变化...")
+        """计算车手圈速变化标准差（所有赛季汇总）"""
+        print("\n计算圈速变化...")
         driver_laps = defaultdict(list)
-        driver_mapping = {}  # 存储车手代号到全名的映射
+        driver_mapping = {}
 
-        for race_data in self.all_data:
-            session = race_data['session']
+        for year, races in self.season_data.items():
+            for race_data in races:
+                session = race_data['session']
 
-            try:
-                results = session.results
-                laps = session.laps
-            except Exception as e:
-                print(f"  跳过 {race_data['event']}: 无法访问数据 - {e}")
-                continue
-
-            # 创建车手代号到全名的映射
-            try:
-                for _, driver_result in results.iterrows():
-                    driver_abbr = driver_result['Abbreviation']
-                    driver_full = driver_result['FullName']
-                    driver_mapping[driver_abbr] = driver_full
-            except Exception as e:
-                print(f"  警告: {race_data['event']} 无法创建车手映射")
-                continue
-
-            # 只考虑正常圈速（排除进站圈、安全车等）
-            try:
-                valid_laps = laps[
-                    (laps['LapTime'].notna()) &
-                    (laps['PitOutTime'].isna()) &
-                    (laps['PitInTime'].isna())
-                    ]
-            except Exception as e:
-                print(f"  警告: {race_data['event']} 无法过滤圈速数据")
-                continue
-
-            for driver in valid_laps['Driver'].unique():
-                driver_name = driver_mapping.get(driver, driver)
                 try:
-                    lap_times = valid_laps[valid_laps['Driver'] == driver]['LapTime'].dt.total_seconds()
+                    results = session.results
+                    laps = session.laps
+                except Exception as e:
+                    continue
 
-                    if len(lap_times) > 5:  # 至少5圈数据
-                        # 计算相对于中位数的标准差
-                        median_time = lap_times.median()
-                        normalized_times = (lap_times - median_time).abs()
-                        driver_laps[driver_name].extend(normalized_times.tolist())
+                # 创建车手代号到全名的映射
+                try:
+                    for _, driver_result in results.iterrows():
+                        driver_abbr = driver_result['Abbreviation']
+                        driver_full = driver_result['FullName']
+                        driver_mapping[driver_abbr] = driver_full
                 except Exception:
                     continue
+
+                # 只考虑正常圈速（排除进站圈）
+                try:
+                    valid_laps = laps[
+                        (laps['LapTime'].notna()) &
+                        (laps['PitOutTime'].isna()) &
+                        (laps['PitInTime'].isna())
+                        ]
+                except Exception:
+                    continue
+
+                for driver in valid_laps['Driver'].unique():
+                    driver_name = driver_mapping.get(driver, driver)
+                    try:
+                        lap_times = valid_laps[valid_laps['Driver'] == driver]['LapTime'].dt.total_seconds()
+
+                        if len(lap_times) > 5:
+                            # 计算相对于中位数的标准差
+                            median_time = lap_times.median()
+                            normalized_times = (lap_times - median_time).abs()
+                            driver_laps[driver_name].extend(normalized_times.tolist())
+                    except Exception:
+                        continue
 
         # 计算每个车手的标准差
         lap_var_sigma = {}
@@ -188,85 +194,88 @@ class F1DataProcessor:
         return lap_var_sigma
 
     def calculate_start_performance(self):
-        """计算车手起步表现"""
+        """计算车手起步表现（所有赛季汇总）"""
         print("计算起步表现...")
         driver_starts = defaultdict(list)
 
-        for race_data in self.all_data:
-            session = race_data['session']
-            results = session.results
+        for year, races in self.season_data.items():
+            for race_data in races:
+                session = race_data['session']
+                try:
+                    results = session.results
+                except:
+                    continue
 
-            for _, driver in results.iterrows():
-                driver_name = driver['FullName']
-                grid_pos = driver['GridPosition']
-                final_pos = driver['Position']
+                for _, driver in results.iterrows():
+                    driver_name = driver['FullName']
+                    grid_pos = driver['GridPosition']
+                    final_pos = driver['Position']
 
-                if pd.notna(grid_pos) and pd.notna(final_pos):
-                    # 简化的起步表现计算（位置变化）
-                    # 正值表示失去位置，负值表示获得位置
-                    position_change = float(final_pos - grid_pos)
-                    driver_starts[driver_name].append(position_change)
+                    if pd.notna(grid_pos) and pd.notna(final_pos) and grid_pos > 0:
+                        # 位置变化转换为时间估算
+                        position_change = float(final_pos - grid_pos)
+                        driver_starts[driver_name].append(position_change)
 
         # 计算均值和标准差
         start_perf = {}
         for driver, changes in driver_starts.items():
             if len(changes) > 3:
-                mean_change = np.mean(changes) * -0.05  # 转换为时间（估算）
+                mean_change = np.mean(changes) * -0.05
                 sigma_change = np.std(changes) * 0.05
                 start_perf[driver] = {
                     'mean': round(mean_change, 3),
                     'sigma': round(sigma_change, 3)
                 }
 
+        print(f"  成功计算 {len(start_perf)} 位车手的起步表现")
         return start_perf
 
     def estimate_pit_stop_parameters(self):
-        """估算进站时间分布参数"""
+        """估算进站时间分布参数（所有赛季汇总）"""
         print("计算进站时间参数...")
         team_pit_times = defaultdict(list)
 
-        for race_data in self.all_data:
-            session = race_data['session']
+        for year, races in self.season_data.items():
+            for race_data in races:
+                session = race_data['session']
 
-            try:
-                results = session.results
-                laps = session.laps
-            except Exception as e:
-                print(f"  跳过 {race_data['event']}: 无法访问数据")
-                continue
+                try:
+                    results = session.results
+                    laps = session.laps
+                except Exception:
+                    continue
 
-            # 创建车手代号到车队的映射
-            driver_to_team = {}
-            try:
-                for _, driver_result in results.iterrows():
-                    driver_abbr = driver_result['Abbreviation']
-                    team_name = driver_result['TeamName']
-                    driver_to_team[driver_abbr] = team_name
-            except Exception:
-                continue
+                # 创建车手代号到车队的映射
+                driver_to_team = {}
+                try:
+                    for _, driver_result in results.iterrows():
+                        driver_abbr = driver_result['Abbreviation']
+                        team_name = driver_result['TeamName']
+                        driver_to_team[driver_abbr] = team_name
+                except Exception:
+                    continue
 
-            # 找到进站圈
-            try:
-                pit_laps = laps[laps['PitInTime'].notna()]
+                # 找到进站圈
+                try:
+                    pit_laps = laps[laps['PitInTime'].notna()]
 
-                for _, lap in pit_laps.iterrows():
-                    if pd.notna(lap['PitOutTime']) and pd.notna(lap['PitInTime']):
-                        pit_duration = (lap['PitOutTime'] - lap['PitInTime']).total_seconds()
-                        if 15 < pit_duration < 60:  # 合理的进站时间范围
-                            driver_abbr = lap['Driver']
-                            team_name = driver_to_team.get(driver_abbr, 'Unknown')
-                            if team_name != 'Unknown':
-                                team_pit_times[team_name].append(pit_duration)
-            except Exception:
-                continue
+                    for _, lap in pit_laps.iterrows():
+                        if pd.notna(lap['PitOutTime']) and pd.notna(lap['PitInTime']):
+                            pit_duration = (lap['PitOutTime'] - lap['PitInTime']).total_seconds()
+                            if 15 < pit_duration < 60:
+                                driver_abbr = lap['Driver']
+                                team_name = driver_to_team.get(driver_abbr, 'Unknown')
+                                if team_name != 'Unknown':
+                                    team_pit_times[team_name].append(pit_duration)
+                except Exception:
+                    continue
 
-        # 使用简化的参数估计（基于均值和标准差）
+        # 使用简化的参数估计
         pit_var_pars = {}
         for team, times in team_pit_times.items():
             if len(times) > 10:
                 mean_time = np.mean(times)
                 std_time = np.std(times)
-                # 简化的Fisk参数估算
                 alpha = max(1.5, mean_time / 10)
                 beta = -std_time / mean_time
                 gamma = std_time
@@ -279,42 +288,33 @@ class F1DataProcessor:
         """生成INI配置文件"""
         print(f"\n生成INI文件: {output_file}")
 
-        # 计算所有统计数据
-        accident_probs = self.calculate_accident_probabilities()
-        failure_probs = self.calculate_failure_probabilities()
+        # 计算通用统计数据（跨赛季）
         lap_var_sigma = self.calculate_lap_time_variability()
         start_perf = self.calculate_start_performance()
         pit_var_pars = self.estimate_pit_stop_parameters()
 
         # 创建INI文件
         config = configparser.ConfigParser()
-        config.optionxform = str  # 保持键名大小写
+        config.optionxform = str
 
-        # 按年份分组数据
-        years = range(self.start_year, self.end_year + 1)
-        for year in years:
+        # 按赛季计算并添加数据
+        print("\n计算各赛季事故和故障概率...")
+        for year in sorted(self.season_data.keys()):
+            if len(self.season_data[year]) == 0:
+                continue
+
+            print(f"  处理 {year} 赛季数据...")
             section_name = f"SEASON_{year}"
             config[section_name] = {}
 
-            # 过滤该年份的车手和车队
-            year_drivers = set()
-            year_teams = set()
+            # 计算该赛季的事故概率和故障概率
+            accident_probs = self.calculate_accident_probabilities_by_season(year)
+            failure_probs = self.calculate_failure_probabilities_by_season(year)
 
-            for race_data in self.all_data:
-                if race_data['year'] == year:
-                    results = race_data['session'].results
-                    year_drivers.update(results['FullName'].tolist())
-                    year_teams.update(results['TeamName'].tolist())
+            config[section_name]['p_accident'] = str(accident_probs)
+            config[section_name]['p_failure'] = str(failure_probs)
 
-            # 添加事故概率
-            year_accident_probs = {d: accident_probs.get(d, 0.058)
-                                   for d in sorted(year_drivers) if d in accident_probs}
-            config[section_name]['p_accident'] = str(year_accident_probs)
-
-            # 添加故障概率
-            year_failure_probs = {t: failure_probs.get(t, 0.071)
-                                  for t in sorted(year_teams) if t in failure_probs}
-            config[section_name]['p_failure'] = str(year_failure_probs)
+            print(f"    车手数: {len(accident_probs)}, 车队数: {len(failure_probs)}")
 
         # 添加通用参数
         config['ALL_SEASONS'] = {}
@@ -338,15 +338,15 @@ class F1DataProcessor:
         # 写入文件
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write("# F1 Monte Carlo Simulation Parameters (2020-2025)\n")
-            f.write("# Generated from FastF1 data\n\n")
+            f.write("# Generated from FastF1 data\n")
+            f.write("# Each season's accident and failure probabilities are calculated independently\n\n")
             config.write(f)
 
-        print(f"✓ INI文件已生成: {output_file}")
+        print(f"\n✓ INI文件已生成: {output_file}")
 
         # 打印统计摘要
         print(f"\n统计摘要:")
-        print(f"  车手数量: {len(accident_probs)}")
-        print(f"  车队数量: {len(failure_probs)}")
+        print(f"  处理赛季: {sorted(self.season_data.keys())}")
         print(f"  圈速数据: {len(lap_var_sigma)} 位车手")
         print(f"  起步数据: {len(start_perf)} 位车手")
         print(f"  进站数据: {len(pit_var_pars)} 支车队")
@@ -355,8 +355,6 @@ class F1DataProcessor:
 # 使用示例
 if __name__ == "__main__":
     # 创建处理器实例
-    # 注意: FastF1 API对2022年及之后的数据可能不稳定
-    # 程序会自动跳过无法加载的赛季和比赛
     processor = F1DataProcessor(start_year=2020, end_year=2025)
 
     # 加载数据
