@@ -63,4 +63,4 @@ def scale_t_lap_var_sigma(file_path, divisor=13.18):
 
 if __name__ == "__main__":
     # clean_ini_file("f1_2020_2025_pars_mcs.ini")
-    scale_t_lap_var_sigma("f1_2020_2025_pars_mcs.ini")
+    scale_t_lap_var_sigma("data/montecarlo/f1_2020_2025_pars_mcs.ini")
